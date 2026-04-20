@@ -339,13 +339,6 @@ Declarative_Pipeline_super_store/
 6. Subsequent runs can be **Triggered** or **Continuous**; Bronze and the
    Silver fact tables are streaming, the rest are rebuilt incrementally.
 
----
 
-## Dependency Notes
 
-- `order_id` / `order_item_id` / `payment_id` use `monotonically_increasing_id()`
-  BIGINT surrogates; the deterministic MD5 hash lives in the companion
-  `*_src_id` STRING column. This matches the Silver schema types while
-  still guaranteeing replay-safe joins through the `*_src_id` keys.
-- `BL_3NF_EMPLOYEE_SCD2` does not hold a BIGINT surrogate, so
-  `BL_3NF_CE_ORDERS` and the Gold fact join to it via `employee_src_id`.
+
