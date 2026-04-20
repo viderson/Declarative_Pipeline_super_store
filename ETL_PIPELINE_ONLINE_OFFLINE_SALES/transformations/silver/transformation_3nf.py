@@ -183,7 +183,6 @@ def bl_3nf_ce_products():
 @dp.table(name="transportation.silver.BL_3NF_CE_COUNTRY")
 def bl_3nf_ce_country():
     
-    # Odczyt jak poprzednio...
     df_offline = spark.read.table("transportation.bronze.offline_bronze") \
         .select(F.col("store_country").alias("country_name")) \
         .withColumn("source_system", F.lit("offline"))
@@ -192,22 +191,15 @@ def bl_3nf_ce_country():
         .select(F.col("Country").alias("country_name")) \
         .withColumn("source_system", F.lit("online"))
 
-    # Łączymy dane surowe
     df_combined_raw = df_offline.unionByName(df_online)
 
-    # -------------------------------------------------------------
-    # KROK HARMONIZACJI (Czyszczenie przed grupowaniem)
-    # -------------------------------------------------------------
     df_cleaned = df_combined_raw.withColumn(
         "country_name",
-        # Funkcja F.trim usuwa ewentualne spacje na końcu/początku
         F.when(F.trim(F.col("country_name")) == "USA", F.lit("United States"))
         .when(F.trim(F.col("country_name")) == "UK", F.lit("United Kingdom"))
-        # Jeśli nie znaleziono dopasowania, zostaw oryginalną nazwę
         .otherwise(F.trim(F.col("country_name"))) 
     )
 
-    # Teraz wykonujemy naszą standardową logikę na oczyszczonych danych
     return (
         df_cleaned.groupBy("country_name")
         .agg(F.collect_set("source_system").alias("systems_array"))
@@ -281,7 +273,7 @@ def bl_3nf_ce_region():
         .withColumn("update_dt", F.current_timestamp())
         .select(
             "region_id",
-            "country_id", # FK do tabeli Krajów
+            "country_id", 
             "region_name",
             "region_src_id",
             "source_system",
@@ -410,8 +402,6 @@ def bl_3nf_ce_city():
 @dp.table(name="transportation.silver.BL_3NF_CE_STORE")
 def bl_3nf_ce_store():
     
-    # 1. Odczyt z Bronze (Zakładamy, że fizyczne sklepy są tylko w offline)
-    # UWAGA: Podmień "nazwa_kolumny_sklepu" na faktyczną kolumnę w Twoim pliku CSV!
     df_offline = spark.read.table("transportation.bronze.offline_bronze") \
         .select(
             F.col("store_name"),
@@ -425,32 +415,24 @@ def bl_3nf_ce_store():
 
     df_unique_stores = df_offline.dropDuplicates(["store_src_id", "store_name", "city_name", "state_name"])
 
-    # -------------------------------------------------------------
-    # 4. MAGIA 3NF: Słownik Lookup dla Miast
-    # Odtwarzamy parę "Miasto + Stan", żeby idealnie wcelować w city_id
-    # -------------------------------------------------------------
     df_state = spark.read.table("transportation.silver.BL_3NF_CE_STATE").select("state_id", "state_name")
     df_city = spark.read.table("transportation.silver.BL_3NF_CE_CITY").select("city_id", "state_id", "city_name")
     
     df_city_lookup = df_city.join(df_state, on="state_id", how="inner")
 
-    # 5. Łączymy nasze sklepy z Lookupem po nazwie miasta ORAZ stanu
     df_final = df_unique_stores.join(
         df_city_lookup,
         on=["city_name", "state_name"],
         how="left"
     )
-
-    # 6. Generowanie kluczy i końcowy format
     return (
         df_final
-        # Generujemy solidny Hash: Sklep + Miasto
         .withColumn("store_id", F.monotonically_increasing_id())
         .withColumn("insert_dt", F.current_timestamp())
         .withColumn("update_dt", F.current_timestamp())
         .select(
             "store_id",
-            "city_id",      # FK: Klucz obcy do tabeli CITY
+            "city_id",     
             "store_name",
             "store_src_id",
             "source_system",
@@ -462,12 +444,10 @@ def bl_3nf_ce_store():
 
 
 
-#ujednolic zamieszkanie customera w ingestion bo maja po 1000 roznych co jest malo realistyczne
+
 @dp.table(name="transportation.silver.BL_3NF_CE_CUSTOMER")
 def bl_3nf_ce_customer():
     
-    # 1. Odczyt TYLKO z systemu Online (bo Offline nie ma klientów)
-    # UWAGA: Upewnij się, że nazwy kolumn z Bronze (np. "First_Name") są poprawne
     df_online = spark.read.table("transportation.bronze.online_bronze") \
         .select(
             F.col("customer_name").alias("first_name"), 
@@ -476,49 +456,42 @@ def bl_3nf_ce_customer():
             F.col("customer_age").cast("int").alias("age"),
             F.trim(F.col("customer_email")).alias("email"),
             F.col("customer_phone_number").alias("phone_number"),
-            F.col("Postal_Code").alias("postal_code"), # Nasz pragmatyczny kod pocztowy
+            F.col("Postal_Code").alias("postal_code"),
             F.trim(F.col("City")).alias("city_name"),
             F.trim(F.col("State")).alias("state_name")
         ) \
         .withColumn("source_system", F.lit("online"))
 
-    # 2. Czyszczenie: Klient jest unikalny na podstawie adresu e-mail
-    # Jeśli ten sam gość kupił 5 razy online, chcemy go w bazie tylko raz!
     df_unique_customers = df_online.dropDuplicates(["email"])
 
-    # -------------------------------------------------------------
-    # 3. Lookup dla Miast (dokładnie to samo co przy sklepach)
-    # -------------------------------------------------------------
     df_state = spark.read.table("transportation.silver.BL_3NF_CE_STATE").select("state_id", "state_name")
     df_city = spark.read.table("transportation.silver.BL_3NF_CE_CITY").select("city_id", "state_id", "city_name")
     
     df_city_lookup = df_city.join(df_state, on="state_id", how="inner")
 
-    # 4. Przypinamy city_id do naszego klienta
     df_final = df_unique_customers.join(
         df_city_lookup,
         on=["city_name", "state_name"],
         how="left"
     )
 
-    # 5. Generowanie kluczy
     return (
         df_final
-        # Używamy e-maila jako bezpiecznego źródła dla hasha
+
         .withColumn("customer_src_id", F.md5(F.col("email")))
         .withColumn("customer_id", F.monotonically_increasing_id())
         .withColumn("insert_dt", F.current_timestamp())
         .withColumn("update_dt", F.current_timestamp())
         .select(
             "customer_id",
-            "city_id",       # FK do tabeli CITY
+            "city_id",      
             "first_name",
             "last_name",
             "gender",
             "age",
             "email",
             "phone_number",
-            "postal_code",   # Nasza nowa kolumna
+            "postal_code",   
             "customer_src_id",
             "source_system",
             "insert_dt",
@@ -529,7 +502,6 @@ def bl_3nf_ce_customer():
 @dp.table(name="transportation.silver.BL_3NF_CE_PAYMENT_METHODS")
 def bl_3nf_ce_payment_methods():
     
-    # 1. Odczyt z systemu Online (czyszczenie ze spacji na start)
     df_online = spark.read.table("transportation.bronze.online_bronze") \
         .select(
             F.col("payment_method"),
@@ -537,8 +509,6 @@ def bl_3nf_ce_payment_methods():
         ) \
         .withColumn("source_system", F.lit("online"))
 
-    # 2. Odczyt z systemu Offline (zmieniamy nazwy kolumn na docelowe)
-    # UWAGA: Upewnij się, że "store_payment_method" to poprawne nazwy w Twoim pliku
     df_offline = spark.read.table("transportation.bronze.offline_bronze") \
         .select(
             F.col("payment_method"),
@@ -546,10 +516,8 @@ def bl_3nf_ce_payment_methods():
         ) \
         .withColumn("source_system", F.lit("offline"))
 
-    # 3. Łączymy dane i odrzucamy ewentualne puste wiersze (śmieci z plików)
     df_combined = df_online.unionByName(df_offline)
 
-    # 4. Nasza sprawdzona logika deduplikacji i łączenia systemów
     df_unique_methods = (
         df_combined.groupBy("payment_method", "payment_provider")
         .agg(F.collect_set("source_system").alias("systems_array"))
@@ -560,14 +528,13 @@ def bl_3nf_ce_payment_methods():
         )
     )
 
-    # 5. Nadanie kluczy zastępczych i ostateczny Select (zgodny w 100% z diagramem)
     return (
         df_unique_methods
         .withColumn("method_id", F.monotonically_increasing_id())
         .withColumn("insert_dt", F.current_timestamp())
         .withColumn("update_dt", F.current_timestamp())
         .select(
-            "method_id",           # PK
+            "method_id",       
             "payment_method",
             "payment_provider",
             "source_system",
@@ -576,7 +543,6 @@ def bl_3nf_ce_payment_methods():
         )
     )
 
-# Employee SCD2 implementation
 dp.create_streaming_table(
     name="transportation.silver.BL_3NF_EMPLOYEE_SCD2",
     schema="""
@@ -616,5 +582,254 @@ dp.create_auto_cdc_flow(
     except_column_list=["insert_dt"],
     stored_as_scd_type=2
 )
-    
 
+
+#st
+@dp.table(
+    name="transportation.silver.BL_3NF_CE_ORDERS",
+    comment="Streaming order header fact combining online and offline orders.",
+    table_properties={
+        "quality": "silver",
+        "layer": "silver_3nf"
+    }
+)
+def bl_3nf_ce_orders():
+    df_online = (
+        spark.readStream.table("transportation.bronze.online_bronze")
+        .select(
+            F.col("Order_ID").cast("string").alias("order_src_id_raw"),
+            F.col("Order_Date").alias("order_date"),
+            F.trim(F.col("customer_email")).alias("email_key"),
+            F.lit(None).cast("string").alias("store_src_id_key"),
+            F.lit(None).cast("string").alias("employee_src_id_key"),
+        )
+        .withColumn("source_system", F.lit("online"))
+        .withColumn("source_entity", F.lit("online_bronze"))
+    )
+
+    df_offline = (
+        spark.readStream.table("transportation.bronze.offline_bronze")
+        .select(
+            F.col("Order_ID").cast("string").alias("order_src_id_raw"),
+            F.col("Order_date").alias("order_date"),
+            F.lit(None).cast("string").alias("email_key"),
+            F.col("store_id").cast("string").alias("store_src_id_key"),
+            F.col("employee_id").cast("string").alias("employee_src_id_key"),
+        )
+        .withColumn("source_system", F.lit("offline"))
+        .withColumn("source_entity", F.lit("offline_bronze"))
+    )
+
+    df_combined = (
+        df_online.unionByName(df_offline)
+        .dropDuplicates(["source_system", "order_src_id_raw"])
+        .withColumn(
+            "order_src_id",
+            F.md5(F.concat(F.col("source_system"), F.col("order_src_id_raw")))
+        )
+    )
+
+    df_customer = (
+        spark.read.table("transportation.silver.BL_3NF_CE_CUSTOMER")
+        .select(F.col("customer_id"), F.trim(F.col("email")).alias("email_key"))
+    )
+    df_store = (
+        spark.read.table("transportation.silver.BL_3NF_CE_STORE")
+        .select(
+            F.col("store_id"),
+            F.col("store_src_id").cast("string").alias("store_src_id_key")
+        )
+    )
+    df_employee = (
+        spark.read.table("transportation.silver.BL_3NF_EMPLOYEE_SCD2")
+        .filter(F.col("__END_AT").isNull())
+        .select(F.col("employee_src_id").alias("employee_src_id_key"))
+        .dropDuplicates(["employee_src_id_key"])
+    )
+
+    df_final = (
+        df_combined
+        .join(df_customer, on="email_key", how="left")
+        .join(df_store, on="store_src_id_key", how="left")
+        .join(df_employee, on="employee_src_id_key", how="left")
+        .withColumnRenamed("employee_src_id_key", "employee_src_id")
+    )
+
+    return (
+        df_final
+        .withColumn("order_id", F.xxhash64("order_src_id", "source_system"))
+        .withColumn("insert_dt", F.current_timestamp())
+        .withColumn("update_dt", F.current_timestamp())
+        .select(
+            "order_id",
+            "customer_id",
+            "store_id",
+            "employee_src_id",
+            "order_date",
+            "order_src_id",
+            "source_system",
+            "source_entity",
+            "insert_dt",
+            "update_dt",
+        )
+    )
+
+
+@dp.table(
+    name="transportation.silver.BL_3NF_CE_ORDERS_ITEMS",
+    comment="Streaming order line items bridge with sales metrics.",
+    table_properties={
+        "quality": "silver",
+        "layer": "silver_3nf"
+    }
+)
+def bl_3nf_ce_orders_items():
+    df_online = (
+        spark.readStream.table("transportation.bronze.online_bronze")
+        .select(
+            F.col("Order_ID").cast("string").alias("order_src_id_raw"),
+            F.col("Product_name").alias("product_name"),
+            F.col("Sales").cast("decimal(18,4)").alias("sales"),
+            F.col("Quantity").cast("int").alias("quantity"),
+            F.col("Discount").cast("decimal(18,4)").alias("discount"),
+            F.col("Profit").cast("decimal(18,4)").alias("profit"),
+            F.col("Cost").cast("decimal(18,4)").alias("cost"),
+        )
+        .withColumn("source_system", F.lit("online"))
+    )
+
+    df_offline = (
+        spark.readStream.table("transportation.bronze.offline_bronze")
+        .select(
+            F.col("Order_ID").cast("string").alias("order_src_id_raw"),
+            F.col("Product_name").alias("product_name"),
+            F.col("Sales").cast("decimal(18,4)").alias("sales"),
+            F.col("Quantity").cast("int").alias("quantity"),
+            F.col("Discount").cast("decimal(18,4)").alias("discount"),
+            F.col("Profit").cast("decimal(18,4)").alias("profit"),
+            F.col("Cost").cast("decimal(18,4)").alias("cost"),
+        )
+        .withColumn("source_system", F.lit("offline"))
+    )
+
+    df_combined = (
+        df_online.unionByName(df_offline)
+        .withColumn(
+            "order_src_id",
+            F.md5(F.concat(F.col("source_system"), F.col("order_src_id_raw")))
+        )
+    )
+
+    df_products = (
+        spark.read.table("transportation.silver.BL_3NF_CE_PRODUCTS")
+        .select("product_id", "product_name")
+        .dropDuplicates(["product_name"])
+    )
+    df_orders = (
+        spark.read.table("transportation.silver.BL_3NF_CE_ORDERS")
+        .select("order_id", "order_src_id")
+    )
+
+    df_final = (
+        df_combined
+        .join(df_products, on="product_name", how="left")
+        .join(df_orders, on="order_src_id", how="left")
+    )
+
+    return (
+        df_final
+        .withColumn("order_item_id", F.xxhash64("order_src_id", "product_name", "sales", "quantity"))
+        .withColumn("insert_dt", F.current_timestamp())
+        .withColumn("update_dt", F.current_timestamp())
+        .select(
+            "order_item_id",
+            "order_id",
+            "product_id",
+            "sales",
+            "quantity",
+            "discount",
+            "profit",
+            "cost",
+            "insert_dt",
+            "update_dt",
+        )
+    )
+
+
+@dp.table(
+    name="transportation.silver.BL_3NF_CE_PAYMENT",
+    comment="Streaming payment fact linking orders to payment methods.",
+    table_properties={
+        "quality": "silver",
+        "layer": "silver_3nf"
+    }
+)
+def bl_3nf_ce_payment():
+    df_online = (
+        spark.readStream.table("transportation.bronze.online_bronze")
+        .select(
+            F.col("Order_ID").cast("string").alias("order_src_id_raw"),
+            F.col("payment_id").cast("string").alias("payment_id_raw"),
+            F.col("payment_method"),
+            F.col("payment_provider"),
+            F.col("Sales").cast("decimal(18,4)").alias("payment_amount"),
+        )
+        .withColumn("source_system", F.lit("online"))
+    )
+
+    df_offline = (
+        spark.readStream.table("transportation.bronze.offline_bronze")
+        .select(
+            F.col("Order_ID").cast("string").alias("order_src_id_raw"),
+            F.col("payment_id").cast("string").alias("payment_id_raw"),
+            F.col("payment_method"),
+            F.col("payment_provider"),
+            F.col("Sales").cast("decimal(18,4)").alias("payment_amount"),
+        )
+        .withColumn("source_system", F.lit("offline"))
+    )
+
+    df_combined = (
+        df_online.unionByName(df_offline)
+        .withColumn(
+            "order_src_id",
+            F.md5(F.concat(F.col("source_system"), F.col("order_src_id_raw")))
+        )
+        .withColumn(
+            "payment_src_id",
+            F.md5(F.concat(F.col("source_system"), F.col("payment_id_raw")))
+        )
+    )
+
+    df_methods = (
+        spark.read.table("transportation.silver.BL_3NF_CE_PAYMENT_METHODS")
+        .select("method_id", "payment_method", "payment_provider")
+        .dropDuplicates(["payment_method", "payment_provider"])
+    )
+    df_orders = (
+        spark.read.table("transportation.silver.BL_3NF_CE_ORDERS")
+        .select("order_id", "order_src_id")
+    )
+
+    df_final = (
+        df_combined
+        .join(df_methods, on=["payment_method", "payment_provider"], how="left")
+        .join(df_orders, on="order_src_id", how="left")
+    )
+
+    return (
+        df_final
+        .withColumn("payment_id", F.xxhash64("payment_src_id", "order_src_id"))
+        .withColumn("insert_dt", F.current_timestamp())
+        .withColumn("update_dt", F.current_timestamp())
+        .select(
+            "payment_id",
+            "order_id",
+            "method_id",
+            "payment_src_id",
+            "payment_amount",
+            "source_system",
+            "insert_dt",
+            "update_dt",
+        )
+    )
